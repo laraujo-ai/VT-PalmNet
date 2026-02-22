@@ -35,7 +35,7 @@ from utils   import get_file_names, save_loss_acc
 
 PALM_NET_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = PALM_NET_DIR.parent
-DATA_DIR     = PROJECT_ROOT / "CCNet" / "data"
+DATA_DIR     = PROJECT_ROOT / "VT-PalmNet"
 
 DATASET_FILES = {
     "tongji": ("train_Tongji.txt", "test_Tongji.txt"),
@@ -54,6 +54,25 @@ def extract_features(
             feats.append(codes)
             ids.append(target.numpy())
     return np.concatenate(feats), np.concatenate(ids)
+
+
+def quick_rank1(
+    model: PalmNet,
+    train_file: str,
+    test_file: str,
+    device: torch.device,
+) -> float:
+    """Fast rank-1 accuracy using batched matrix ops. No file I/O, no external scripts."""
+    train_ds = PalmDataset(train_file, train=False)
+    test_ds  = PalmDataset(test_file,  train=False)
+    feat_train, id_train = extract_features(model, DataLoader(train_ds, batch_size=512, num_workers=2), device, "gallery")
+    feat_test,  id_test  = extract_features(model, DataLoader(test_ds,  batch_size=512, num_workers=2), device, "probe")
+    # features are unit vectors → dot product = cosine similarity
+    sim  = feat_test @ feat_train.T          # (n_test, n_train)
+    pred = id_train[np.argmax(sim, axis=1)]
+    rank1 = float(np.mean(pred == id_test) * 100)
+    print(f"  [quick] Rank-1: {rank1:.3f}%")
+    return rank1
 
 
 def evaluate(
@@ -141,6 +160,7 @@ def evaluate(
 
     sys.stdout.flush()
     print("────────────────────────────────────────────\n")
+    return rank1
 
 
 def _run_eval(script: str, score_path: Path, tag: str):
@@ -204,11 +224,6 @@ def train_epoch(
 
     return running_loss / total, 100.0 * running_correct / total
 
-
-# ---------------------------------------------------------------------------
-# Args
-# ---------------------------------------------------------------------------
-
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Train PalmNet")
 
@@ -224,11 +239,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--arc_m",      type=float, default=0.5)
 
     p.add_argument("--epochs",     type=int,   default=3000)
-    p.add_argument("--batch_size", type=int,   default=256)
+    p.add_argument("--batch_size", type=int,   default=512)
     p.add_argument("--lr",         type=float, default=1e-3)
     p.add_argument("--lr_step",    type=int,   default=500)
     p.add_argument("--lr_gamma",   type=float, default=0.8)
     p.add_argument("--temp",       type=float, default=0.07)
+    
     p.add_argument("--w_ce",       type=float, default=0.8)
     p.add_argument("--w_con",      type=float, default=0.2)
 
@@ -236,12 +252,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--checkpoint_dir", type=str, default="./results/checkpoint/")
     p.add_argument("--rst_dir",        type=str, default="./results/rst_test/")
 
-    p.add_argument("--eval_interval", type=int, default=1000)
-    p.add_argument("--save_interval", type=int, default=500)
+    p.add_argument("--eval_interval",       type=int, default=1000,
+                   help="Interval for full evaluation (EER + rank-1 + scripts)")
+    p.add_argument("--quick_eval_interval", type=int, default=100,
+                   help="Interval for fast rank-1 check used by early stopping")
+    p.add_argument("--save_interval",       type=int, default=500)
+    p.add_argument("--patience",            type=int, default=None,
+                   help="Stop after this many quick evals with no rank-1 improvement. Disabled if not set.")
 
     return p.parse_args()
-
-
 
 def main():
     args = parse_args()
@@ -287,11 +306,15 @@ def main():
     print(f"  Epochs     : {args.epochs}  |  Batch: {args.batch_size}")
     print(f"  LR         : {args.lr}  step {args.lr_step}×{args.lr_gamma}")
     print(f"  Losses     : CE×{args.w_ce} + SupCon×{args.w_con}  (T={args.temp})")
+    print(f"  Patience   : {args.patience if args.patience is not None else 'disabled'}  (quick eval every {args.quick_eval_interval} epochs)")
     print(f"  Started    : {time.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*55}\n")
 
     train_losses, train_accs = [], []
-    best_acc = 0.0
+    best_train_acc  = 0.0
+    best_eval_acc   = 0.0
+    patience_counter = 0
+    stopped_early   = False
 
     epoch_bar = tqdm(range(args.epochs), desc="training", unit="epoch", dynamic_ncols=True)
 
@@ -304,31 +327,48 @@ def main():
 
         train_losses.append(loss)
         train_accs.append(acc)
+        if acc > best_train_acc:
+            best_train_acc = acc
 
         epoch_bar.set_postfix(
             loss=f"{loss:.4f}",
             acc=f"{acc:.1f}%",
-            best=f"{best_acc:.1f}%",
+            best_eval=f"{best_eval_acc:.2f}%",
             lr=f"{scheduler.get_last_lr()[0]:.2e}",
         )
-
-        if acc >= best_acc:
-            best_acc = acc
-            torch.save(net.state_dict(), ckpt_dir / "net_params_best.pth")
-            best_net = copy.deepcopy(net)
 
         if epoch % args.save_interval == 0 or epoch == args.epochs - 1:
             torch.save(net.state_dict(), ckpt_dir / "net_params.pth")
             torch.save(net.state_dict(), ckpt_dir / f"epoch_{epoch}_net_params.pth")
-            save_loss_acc(train_losses, train_accs, best_acc, str(rst_dir))
+            save_loss_acc(train_losses, train_accs, best_train_acc, str(rst_dir))
+
+        if epoch % args.quick_eval_interval == 0 and epoch != 0:
+            eval_acc = quick_rank1(net, train_file, test_file, device)
+
+            if eval_acc > best_eval_acc:
+                best_eval_acc = eval_acc
+                patience_counter = 0
+                torch.save(net.state_dict(), ckpt_dir / "net_params_best.pth")
+                best_net = copy.deepcopy(net)
+                print(f"  New best rank-1: {best_eval_acc:.3f}%  → checkpoint saved")
+            elif args.patience is not None:
+                patience_counter += 1
+                print(f"  No improvement ({eval_acc:.3f}% vs best {best_eval_acc:.3f}%). "
+                      f"Patience: {patience_counter}/{args.patience}")
+                if patience_counter >= args.patience:
+                    print(f"\nEarly stopping triggered after {patience_counter} quick evals without improvement.")
+                    stopped_early = True
+                    break
 
         if epoch % args.eval_interval == 0 and epoch != 0:
             evaluate(net, train_file, test_file, rst_dir, device)
 
-    print(f"\nTraining done.  Best train acc: {best_acc:.2f}%")
-
-    print("\n── Final evaluation (last model) ──")
-    evaluate(net, train_file, test_file, rst_dir, device)
+    if stopped_early:
+        print(f"\nStopped early at epoch {epoch}.  Best eval rank-1: {best_eval_acc:.3f}%")
+    else:
+        print(f"\nTraining done.  Best train acc: {best_train_acc:.2f}%  Best eval rank-1: {best_eval_acc:.3f}%")
+        print("\n── Final evaluation (last model) ──")
+        evaluate(net, train_file, test_file, rst_dir, device)
 
     print("\n── Final evaluation (best model) ──")
     best_net.to(device)

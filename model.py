@@ -32,12 +32,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn import Parameter
-from torchvision.models import mobilenet_v3_small
+from torchvision.models import mobilenet_v3_large
 
-
-# ---------------------------------------------------------------------------
-# Learnable Gabor filter bank
-# ---------------------------------------------------------------------------
 
 class GaborLayer(nn.Module):
     """
@@ -70,12 +66,10 @@ class GaborLayer(nn.Module):
         self.stride = stride
         self.padding = padding
 
-        # Learnable envelope / frequency parameters
         self.sigma = nn.Parameter(torch.tensor(9.2))
         self.freq  = nn.Parameter(torch.tensor(0.057))
         self.gamma = nn.Parameter(torch.tensor(2.0))
 
-        # Fixed, equally-spaced orientations in [0, π)
         angles = torch.arange(num_orientations).float() * math.pi / num_orientations
         self.register_buffer("theta", angles)  # not learned
 
@@ -105,11 +99,6 @@ class GaborLayer(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return F.conv2d(x, self._make_filters(), stride=self.stride, padding=self.padding)
 
-
-# ---------------------------------------------------------------------------
-# ArcFace head
-# Based on: https://github.com/ronghuaiyang/arcface-pytorch  (MIT Licence)
-# ---------------------------------------------------------------------------
 
 class ArcMarginProduct(nn.Module):
     """
@@ -162,10 +151,6 @@ class ArcMarginProduct(nn.Module):
         return output * self.s
 
 
-# ---------------------------------------------------------------------------
-# PalmNet
-# ---------------------------------------------------------------------------
-
 class PalmNet(nn.Module):
     """
     PalmNet: commercial palmprint recognition network.
@@ -190,14 +175,12 @@ class PalmNet(nn.Module):
     def __init__(
         self,
         num_classes: int,
-        embed_dim: int = 256,
+        embed_dim: int = 512,
         s: float = 30.0,
         m: float = 0.5,
     ):
         super().__init__()
 
-        # Stage 1 — Learnable Gabor bank (9 orientations, stride 2)
-        # Input:  (B, 1, 128, 128) → Output: (B, 9, 64, 64)
         self.gabor = GaborLayer(
             num_orientations=9,
             kernel_size=17,
@@ -205,10 +188,8 @@ class PalmNet(nn.Module):
             padding=8,
         )
 
-        # Stage 2 — MobileNetV3-Small backbone (Apache 2.0)
-        # Patch the first conv from 3-channel (RGB) → 9-channel (Gabor).
-        mbv3 = mobilenet_v3_small(weights=None)
-        first_conv = mbv3.features[0][0]          # Conv2d(3, 16, 3, stride=2)
+        mbv3 = mobilenet_v3_large(weights="IMAGENET1K_V1")
+        first_conv = mbv3.features[0][0]
         mbv3.features[0][0] = nn.Conv2d(
             9,
             first_conv.out_channels,
@@ -217,25 +198,21 @@ class PalmNet(nn.Module):
             padding=first_conv.padding,
             bias=False,
         )
-        self.backbone = mbv3.features             # all InvRes + SE blocks
-        self.avgpool  = mbv3.avgpool              # AdaptiveAvgPool2d(1)
-
-        # Stage 3 — Embedding head: 576 → embed_dim
+        self.backbone = mbv3.features             
+        self.avgpool  = mbv3.avgpool
         self.embed_head = nn.Sequential(
-            nn.Linear(576, embed_dim),
+            nn.Linear(960, embed_dim),
             nn.BatchNorm1d(embed_dim),
             nn.Hardswish(),
         )
 
-        # Stage 4 — ArcFace head (training only)
         self.arc_head = ArcMarginProduct(embed_dim, num_classes, s=s, m=m)
 
-    # ------------------------------------------------------------------
 
     def get_embedding(self, x: torch.Tensor) -> torch.Tensor:
         """Return L2-normalised embedding.  Shape: (B, embed_dim)."""
         x = self.gabor(x)       # (B, 9, 64, 64)
-        x = self.backbone(x)    # (B, 576, 2, 2)  — exact size depends on input
+        x = self.backbone(x)    # (B, 576, 2, 2) 
         x = self.avgpool(x)     # (B, 576, 1, 1)
         x = x.flatten(1)        # (B, 576)
         x = self.embed_head(x)  # (B, embed_dim)
@@ -253,10 +230,6 @@ class PalmNet(nn.Module):
         """Alias for get_embedding — compatible with CCNet evaluation scripts."""
         return self.get_embedding(x)
 
-
-# ---------------------------------------------------------------------------
-# Quick sanity check
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     net = PalmNet(num_classes=600)

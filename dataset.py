@@ -49,6 +49,7 @@ class NormSingleROI:
         return flat.view(1, h, w)
 
 
+
 def _make_transforms(imside: int, train: bool) -> T.Compose:
     if not train:
         return T.Compose([
@@ -57,29 +58,27 @@ def _make_transforms(imside: int, train: bool) -> T.Compose:
             NormSingleROI(),
         ])
 
+    BICUBIC = T.InterpolationMode.BICUBIC
     return T.Compose([
         T.Resize(imside),
+
+        T.RandomResizedCrop(size=imside, scale=(0.75, 1.0), ratio=(0.95, 1.05)),
+        T.RandomApply([T.RandomPerspective(distortion_scale=0.2, p=1.0)], p=0.5),
         T.RandomChoice([
-            T.ColorJitter(brightness=0, contrast=0.05, saturation=0, hue=0),
-            T.RandomResizedCrop(size=imside, scale=(0.8, 1.0), ratio=(1.0, 1.0)),
-            T.RandomPerspective(distortion_scale=0.15, p=1.0),
-            T.RandomChoice([
-                T.RandomRotation(
-                    degrees=10,
-                    interpolation=T.InterpolationMode.BICUBIC,
-                    expand=False,
-                    center=(0.5 * imside, 0.0),
-                ),
-                T.RandomRotation(
-                    degrees=10,
-                    interpolation=T.InterpolationMode.BICUBIC,
-                    expand=False,
-                    center=(0.0, 0.5 * imside),
-                ),
-            ]),
+            T.RandomRotation(degrees=15, interpolation=BICUBIC, expand=False,
+                             center=(0.5 * imside, 0.0)),
+            T.RandomRotation(degrees=15, interpolation=BICUBIC, expand=False,
+                             center=(0.0, 0.5 * imside)),
+            T.RandomRotation(degrees=15, interpolation=BICUBIC, expand=False),
         ]),
+
+        T.RandomApply([T.ColorJitter(brightness=0.15, contrast=0.2)], p=0.5),
+        T.RandomApply([T.GaussianBlur(kernel_size=5, sigma=(0.1, 2.0))], p=0.3),
+
         T.ToTensor(),
         NormSingleROI(),
+
+        T.RandomErasing(p=0.3, scale=(0.02, 0.12), ratio=(0.3, 3.3), value=0),
     ])
 
 
@@ -104,7 +103,6 @@ class PalmDataset(data.Dataset):
         self.images_label: list[str] = []
         self._read_txt(txt)
 
-        # Build label→indices map for fast in-class sampling
         self._label_to_indices: dict[str, list[int]] = {}
         for i, lbl in enumerate(self.images_label):
             self._label_to_indices.setdefault(lbl, []).append(i)
@@ -127,13 +125,12 @@ class PalmDataset(data.Dataset):
         img1  = self._load(self.images_path[index])
 
         if self.train:
-            # Pick a different sample from the same class for the second view
             candidates = self._label_to_indices[label]
             idx2 = index
             while idx2 == index and len(candidates) > 1:
                 idx2 = int(np.random.choice(candidates))
             img2 = self._load(self.images_path[idx2])
         else:
-            img2 = img1  # no second view needed during evaluation
+            img2 = img1  
 
         return [img1, img2], int(label)

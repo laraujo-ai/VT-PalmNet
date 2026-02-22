@@ -6,9 +6,6 @@ The exported model:
   Output : (1, embed_dim)    float32  — L2-normalised embedding (default 256-dim)
 
 The ArcFace classification head is NOT exported — only the embedding branch.
-On the Raspberry Pi / edge device, matching is done via cosine similarity
-between stored reference embeddings and the live query embedding.
-
 Usage
 -----
 # Export after training:
@@ -23,7 +20,6 @@ python palm_net/export.py --weights ... --verify
 Requirements
 ------------
 pip install onnx onnxruntime   # for verification on the training machine
-pip install onnxruntime        # on the Raspberry Pi (CPU only)
 """
 
 import argparse
@@ -33,12 +29,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from palm_net.model import PalmNet
+from model import PalmNet
 
-
-# ---------------------------------------------------------------------------
-# Thin wrapper that exports only the embedding branch
-# ---------------------------------------------------------------------------
 
 class EmbeddingOnly(nn.Module):
     """Wraps PalmNet so that ONNX export captures only get_embedding()."""
@@ -50,10 +42,6 @@ class EmbeddingOnly(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.model.get_embedding(x)
 
-
-# ---------------------------------------------------------------------------
-# Export
-# ---------------------------------------------------------------------------
 
 def export_onnx(
     weights: str,
@@ -93,10 +81,6 @@ def export_onnx(
     return out_path
 
 
-# ---------------------------------------------------------------------------
-# Verification
-# ---------------------------------------------------------------------------
-
 def verify_onnx(onnx_path: Path, weights: str, id_num: int, embed_dim: int):
     """Compare PyTorch and ONNX Runtime outputs on a random input."""
     try:
@@ -109,7 +93,6 @@ def verify_onnx(onnx_path: Path, weights: str, id_num: int, embed_dim: int):
 
     print("\nVerifying ONNX model …")
 
-    # PyTorch reference
     net = PalmNet(num_classes=id_num, embed_dim=embed_dim)
     net.load_state_dict(torch.load(weights, map_location="cpu"))
     net.eval()
@@ -120,7 +103,6 @@ def verify_onnx(onnx_path: Path, weights: str, id_num: int, embed_dim: int):
     with torch.no_grad():
         pt_out = wrapper(dummy).numpy()
 
-    # ONNX Runtime
     sess = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
     ort_out = sess.run(["embedding"], {"palm_roi": dummy.numpy()})[0]
 
@@ -134,51 +116,12 @@ def verify_onnx(onnx_path: Path, weights: str, id_num: int, embed_dim: int):
     else:
         print("  WARNING — outputs differ more than expected.")
 
-    # Cosine similarity between two different random palms (should be low)
     dummy2 = torch.randn(1, 1, 128, 128)
     with torch.no_grad():
         emb1 = wrapper(dummy).numpy()[0]
         emb2 = wrapper(dummy2).numpy()[0]
-    cos_sim = np.dot(emb1, emb2)  # both L2-normalised
+    cos_sim = np.dot(emb1, emb2) 
     print(f"\nSanity: cosine sim between two random inputs = {cos_sim:.4f} (expect near 0)")
-
-
-# ---------------------------------------------------------------------------
-# Raspberry Pi usage note
-# ---------------------------------------------------------------------------
-
-RASPI_USAGE = """
-Raspberry Pi / Edge deployment
--------------------------------
-1. Copy palm_net.onnx to the device.
-
-2. Install runtime:
-       pip install onnxruntime       # CPU-only, ARM64 supported
-
-3. Run inference (Python snippet):
-       import onnxruntime as ort
-       import numpy as np
-
-       sess = ort.InferenceSession("palm_net.onnx",
-                                   providers=["CPUExecutionProvider"])
-
-       # roi: (1, 128, 128) float32 grayscale, normalised (NormSingleROI)
-       roi = preprocess(raw_image)              # your preprocessing
-       inp = roi[np.newaxis, np.newaxis, ...]   # → (1, 1, 128, 128)
-
-       embedding = sess.run(["embedding"], {"palm_roi": inp})[0]  # (1, 256)
-       embedding = embedding[0]                 # (256,)
-
-       # Match against stored references:
-       cos_dist = np.arccos(np.clip(np.dot(embedding, ref_embedding), -1, 1)) / np.pi
-       # Threshold: tune on your dataset. CCNet uses arccos / pi in [0, 1].
-       # Lower = more similar. Typical good match: < 0.15
-"""
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 
 def parse_args():
     p = argparse.ArgumentParser(description="Export PalmNet to ONNX")
@@ -213,7 +156,6 @@ def main():
         verify_onnx(onnx_path, args.weights, args.id_num, args.embed_dim)
 
     print("\nDone.")
-    print(f"Next step: python palm_net/export.py --raspi  (to see deployment notes)")
 
 
 if __name__ == "__main__":
