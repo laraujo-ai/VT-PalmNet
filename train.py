@@ -234,13 +234,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--id_num",     type=int, default=600,
                    help="Tongji=600  IITD=460  PolyU=378")
 
-    p.add_argument("--embed_dim",  type=int,   default=256)
-    p.add_argument("--arc_s",      type=float, default=30.0)
-    p.add_argument("--arc_m",      type=float, default=0.5)
+    p.add_argument("--embed_dim",     type=int,   default=512)
+    p.add_argument("--ppu_channels", type=int,   default=32,
+                   help="PPU output channels per CB order. feat_dim=411×ppu_channels. "
+                        "32→~57M params  16→~14M  8→~1.7M")
+    p.add_argument("--fc_hidden",    type=int,   default=4096,
+                   help="FC1 hidden width (largest layer). Reduce alongside ppu_channels.")
+    p.add_argument("--arc_s",        type=float, default=30.0)
+    p.add_argument("--arc_m",        type=float, default=0.5)
 
     p.add_argument("--epochs",     type=int,   default=3000)
     p.add_argument("--batch_size", type=int,   default=512)
-    p.add_argument("--lr",         type=float, default=1e-3)
+    p.add_argument("--lr",         type=float, default=1e-4)
     p.add_argument("--lr_step",    type=int,   default=500)
     p.add_argument("--lr_gamma",   type=float, default=0.8)
     p.add_argument("--temp",       type=float, default=0.07)
@@ -286,7 +291,9 @@ def main():
         num_workers=4, pin_memory=(device.type == "cuda"),
     )
 
-    net      = PalmNet(args.id_num, embed_dim=args.embed_dim, s=args.arc_s, m=args.arc_m)
+    net      = PalmNet(args.id_num, embed_dim=args.embed_dim,
+                       ppu_channels=args.ppu_channels, fc_hidden=args.fc_hidden,
+                       s=args.arc_s, m=args.arc_m)
     best_net = copy.deepcopy(net)
     net.to(device)
 
@@ -302,7 +309,7 @@ def main():
     print(f"  Device     : {device}")
     print(f"  Dataset    : {args.dataset}  ({args.id_num} classes)")
     print(f"  Params     : {total_params:,}")
-    print(f"  Embed dim  : {args.embed_dim}")
+    print(f"  Embed dim  : {args.embed_dim}  |  PPU ch: {args.ppu_channels}  |  FC hidden: {args.fc_hidden}")
     print(f"  Epochs     : {args.epochs}  |  Batch: {args.batch_size}")
     print(f"  LR         : {args.lr}  step {args.lr_step}×{args.lr_gamma}")
     print(f"  Losses     : CE×{args.w_ce} + SupCon×{args.w_con}  (T={args.temp})")

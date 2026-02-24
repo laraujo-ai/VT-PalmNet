@@ -65,11 +65,11 @@ def _make_transforms(imside: int, train: bool) -> T.Compose:
         T.RandomResizedCrop(size=imside, scale=(0.75, 1.0), ratio=(0.95, 1.05)),
         T.RandomApply([T.RandomPerspective(distortion_scale=0.2, p=1.0)], p=0.5),
         T.RandomChoice([
-            T.RandomRotation(degrees=15, interpolation=BICUBIC, expand=False,
+            T.RandomRotation(degrees=5, interpolation=BICUBIC, expand=False,
                              center=(0.5 * imside, 0.0)),
-            T.RandomRotation(degrees=15, interpolation=BICUBIC, expand=False,
+            T.RandomRotation(degrees=5, interpolation=BICUBIC, expand=False,
                              center=(0.0, 0.5 * imside)),
-            T.RandomRotation(degrees=15, interpolation=BICUBIC, expand=False),
+            T.RandomRotation(degrees=5, interpolation=BICUBIC, expand=False),
         ]),
 
         T.RandomApply([T.ColorJitter(brightness=0.15, contrast=0.2)], p=0.5),
@@ -80,7 +80,6 @@ def _make_transforms(imside: int, train: bool) -> T.Compose:
 
         T.RandomErasing(p=0.3, scale=(0.02, 0.12), ratio=(0.3, 3.3), value=0),
     ])
-
 
 class PalmDataset(data.Dataset):
     """

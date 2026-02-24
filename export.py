@@ -29,7 +29,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-from model import PalmNet
+from model_with_competitive import PalmNet
 
 
 class EmbeddingOnly(nn.Module):
@@ -49,11 +49,13 @@ def export_onnx(
     embed_dim: int,
     output:  str,
     opset:   int = 17,
+    ppu_channels : int = 8,
+    fc_hidden : int = 512
 ) -> Path:
     out_path = Path(output)
 
     print(f"Loading weights from: {weights}")
-    net = PalmNet(num_classes=id_num, embed_dim=embed_dim)
+    net = PalmNet(num_classes=id_num, embed_dim=embed_dim, ppu_channels=ppu_channels, fc_hidden=fc_hidden)
     state = torch.load(weights, map_location="cpu")
     net.load_state_dict(state)
     net.eval()
@@ -81,7 +83,7 @@ def export_onnx(
     return out_path
 
 
-def verify_onnx(onnx_path: Path, weights: str, id_num: int, embed_dim: int):
+def verify_onnx(onnx_path: Path, weights: str, id_num: int, embed_dim: int, ppu_channels :int = 8):
     """Compare PyTorch and ONNX Runtime outputs on a random input."""
     try:
         import onnxruntime as ort
@@ -93,7 +95,7 @@ def verify_onnx(onnx_path: Path, weights: str, id_num: int, embed_dim: int):
 
     print("\nVerifying ONNX model …")
 
-    net = PalmNet(num_classes=id_num, embed_dim=embed_dim)
+    net = PalmNet(num_classes=id_num, embed_dim=embed_dim, ppu_channels=ppu_channels)
     net.load_state_dict(torch.load(weights, map_location="cpu"))
     net.eval()
     wrapper = EmbeddingOnly(net)
@@ -130,6 +132,12 @@ def parse_args():
     p.add_argument("--embed_dim", type=int, default=256)
     p.add_argument("--output",    type=str, default="palm_net.onnx")
     p.add_argument("--opset",     type=int, default=17)
+    p.add_argument("--ppu_channels", type=int,   default=32,
+                help="PPU output channels per CB order. feat_dim=411×ppu_channels. "
+                    "32→~57M params  16→~14M  8→~1.7M")
+    p.add_argument("--fc_hidden",    type=int,   default=4096,
+                   help="FC1 hidden width (largest layer). Reduce alongside ppu_channels.")
+
     p.add_argument("--verify",    action="store_true",
                    help="Verify ONNX output matches PyTorch (requires onnxruntime).")
     p.add_argument("--raspi",     action="store_true",
@@ -150,6 +158,8 @@ def main():
         embed_dim=args.embed_dim,
         output=args.output,
         opset=args.opset,
+        ppu_channels=args.ppu_channels,
+        fc_hidden= args.fc_hidden
     )
 
     if args.verify:
